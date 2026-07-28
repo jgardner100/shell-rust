@@ -7,22 +7,82 @@ use std::collections::{HashSet, HashMap};
 use std::sync::Mutex;
 use rustyline::config::CompletionType;
 
-// Job struct to track background jobs
 #[derive(Debug, Clone)]
 struct Job {
     job_number: u32,
     pid: u32,
     command: String,
     status: String,
-    // We'll use a separate map to track child processes by PID
 }
 
-// Global storage for registered completions, jobs, and child processes
 lazy_static::lazy_static! {
     static ref COMPLETIONS: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
     static ref JOB_COUNTER: Mutex<u32> = Mutex::new(0);
     static ref JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
     static ref CHILD_PROCESSES: Mutex<HashMap<u32, Box<std::process::Child>>> = Mutex::new(HashMap::new());
+}
+
+/// Compute markers (+, -, or space) based on current job list
+fn get_job_markers(jobs: &[Job]) -> HashMap<u32, &'static str> {
+    let mut markers = HashMap::new();
+    
+    // Reverse order (most recent first)
+    let active_or_reaped: Vec<u32> = jobs.iter().map(|j| j.pid).rev().collect();
+    
+    if let Some(&curr_pid) = active_or_reaped.get(0) {
+        markers.insert(curr_pid, "+");
+    }
+    if let Some(&prev_pid) = active_or_reaped.get(1) {
+        markers.insert(prev_pid, "-");
+    }
+    
+    markers
+}
+
+/// Non-blockingly updates job statuses. Prints reaped jobs if `display_reaped` is true.
+fn reap_jobs(display_reaped: bool) {
+    let mut jobs = JOBS.lock().unwrap();
+    let mut children = CHILD_PROCESSES.lock().unwrap();
+
+    // 1. Update status for finished children
+    for job in jobs.iter_mut() {
+        if job.status == "Running" {
+            if let Some(mut child) = children.remove(&job.pid) {
+                match child.try_wait() {
+                    Ok(Some(_status)) => {
+                        job.status = "Done".to_string();
+                    }
+                    Ok(None) => {
+                        children.insert(job.pid, child);
+                    }
+                    Err(_) => {
+                        children.insert(job.pid, child);
+                    }
+                }
+            }
+        }
+    }
+
+    // 2. Determine job markers before printing/purging
+    let markers = get_job_markers(&jobs);
+
+    // 3. Display prompt-reaped jobs if requested
+    if display_reaped {
+        for job in jobs.iter() {
+            if job.status == "Done" {
+                let marker = markers.get(&job.pid).copied().unwrap_or(" ");
+                println!(
+                    "[{}]{}  {:<24}{}",
+                    job.job_number, marker, job.status, job.command
+                );
+            }
+        }
+    }
+
+    // 4. Remove 'Done' jobs if they were displayed
+    if display_reaped {
+        jobs.retain(|job| job.status != "Done");
+    }
 }
 
 fn find_executables_in_path_matching(prefix: &str) -> Vec<String> {
@@ -69,7 +129,6 @@ fn find_files_in_current_dir_matching(prefix: &str) -> Vec<(String, bool)> {
     if let Ok(entries) = fs::read_dir(".") {
         for entry in entries.flatten() {
             if let Ok(file_name) = entry.file_name().into_string() {
-                // Skip . and .. 
                 if file_name == "." || file_name == ".." {
                     continue;
                 }
@@ -96,7 +155,6 @@ fn find_files_in_path_matching(dir_path: &str, prefix: &str) -> Vec<(String, boo
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
             if let Ok(file_name) = entry.file_name().into_string() {
-                // Skip . and ..
                 if file_name == "." || file_name == ".." {
                     continue;
                 }
@@ -155,13 +213,8 @@ fn invoke_completer(
 ) -> Option<Vec<String>> {
     let mut command = process::Command::new(script_path);
 
-    // argv[1] = command name
     let command_name = &cmd_parts[0];
-
-    // argv[2] = word currently being completed
     let current_word = &cmd_parts[word_index];
-
-    // argv[3] = previous word (or "")
     let previous_word = if word_index > 0 {
         &cmd_parts[word_index - 1]
     } else {
@@ -173,22 +226,18 @@ fn invoke_completer(
         .arg(current_word)
         .arg(previous_word);
 
-    // Set COMP_LINE and COMP_POINT environment variables
     command.env("COMP_LINE", comp_line);
     command.env("COMP_POINT", comp_point.to_string());
 
     let output = command.output().ok()?;
 
-    // Check status
     if !output.status.success() {
         eprintln!("Completer error: {}", String::from_utf8_lossy(&output.stderr));
         return None;
     }
 
-    // Read stdout and get all lines
     let stdout = String::from_utf8(output.stdout).ok()?;
 
-    // Collect all non-empty lines, sorted alphabetically
     let mut candidates: Vec<String> = stdout
         .lines()
         .map(|s| s.to_string())
@@ -204,7 +253,6 @@ fn invoke_completer(
     }
 }
 
-/// Calculate the longest common prefix (LCP) of all strings in the list
 fn longest_common_prefix(strings: &[String]) -> String {
     if strings.is_empty() {
         return String::new();
@@ -229,7 +277,6 @@ fn longest_common_prefix(strings: &[String]) -> String {
     lcp
 }
 
-/// Calculate the longest common prefix for files (without considering is_dir)
 fn longest_common_prefix_files(files: &[(String, bool)]) -> String {
     if files.is_empty() {
         return String::new();
@@ -317,19 +364,15 @@ fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection
         }
         
         if run_background {
-            // Run in background without waiting
             let child = command.spawn()?;
-            // Get the PID and increment job counter
             let pid = child.id();
             let mut counter = JOB_COUNTER.lock().unwrap();
             *counter += 1;
             let job_number = *counter;
-            
-            // Store the child process for later reaping
+
             let mut children = CHILD_PROCESSES.lock().unwrap();
             children.insert(pid, Box::new(child));
             
-            // Store the job - use the command without the trailing &
             let job_command = original_command.trim_end_matches('&').trim().to_string();
             let job = Job {
                 job_number,
@@ -342,7 +385,6 @@ fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection
             
             println!("[{}] {}", job_number, pid);
         } else {
-            // Run in foreground and wait
             let mut child = command.spawn()?;
             child.wait()?;
         }
@@ -437,7 +479,6 @@ fn main() {
     use rustyline::{Context, Helper};
 
     struct ShellHelper {
-        // Store: (last_line, dir_path, prefix, matches, is_first_tab)
         tab_state: Mutex<Option<(String, String, String, Vec<(String, bool)>, bool)>>,
     }
 
@@ -459,29 +500,22 @@ fn main() {
         ) -> rustyline::Result<(usize, Vec<Pair>)> {
             let slice = &line[..pos];
 
-            // Check if we're completing the command itself (no space in the line)
             if !slice.contains(' ') && !slice.is_empty() {
-                // We're completing the command itself
                 let partial_cmd = slice;
 
-                // 1. Check if a completer is registered for this partial command
                 let completer_for_cmd = {
                     let completions = COMPLETIONS.lock().unwrap();
                     completions.get(partial_cmd).cloned()
                 };
 
                 if let Some(completer_path) = completer_for_cmd {
-                    // We have a registered completer for this command
-                    // Run the completer script and get its output
                     let cmd_parts = vec![partial_cmd.to_string()];
                     if let Some(candidates) = invoke_completer(&completer_path, &cmd_parts, 0, line, pos) {
-                        // Handle multiple candidates
                         if candidates.is_empty() {
                             return Ok((pos, vec![]));
                         }
 
                         if candidates.len() == 1 {
-                            // Single candidate - auto-complete with trailing space
                             return Ok((
                                 0,
                                 vec![Pair {
@@ -491,11 +525,8 @@ fn main() {
                             ));
                         }
 
-                        // Multiple candidates - use LCP logic
-                        //let lcp = longest_common_prefix(&candidates);
                         let mut state = self.tab_state.lock().unwrap();
 
-                        // Check if we're in the same completion context
                         let is_first_tab = if let Some((last_line, _, _, last_matches, _)) = state.as_ref() {
                             let last_matches_names: Vec<String> = last_matches.iter().map(|(n, _)| n.clone()).collect();
                             !(last_line == line && last_matches_names == candidates)
@@ -504,7 +535,6 @@ fn main() {
                         };
 
                         if is_first_tab {
-                            // First TAB: ring the bell (since there's no unique completion)
                             print!("\x07");
                             std::io::stdout().flush().ok();
 
@@ -518,7 +548,6 @@ fn main() {
 
                             return Ok((pos, vec![]));
                         } else {
-                            // Second TAB: display all candidates
                             let output = candidates.join("  ");
                             println!();
                             print!("{}", output);
@@ -539,11 +568,8 @@ fn main() {
                     }
                 }
 
-                // If no registered completer, use default completion logic
-                // 1. Gather all matching executables from PATH
                 let mut matches = find_executables_in_path_matching(slice);
 
-                // 2. Add matching builtins
                 let builtins = ["echo", "exit", "type", "pwd", "cd", "complete", "jobs"];
                 for builtin in builtins {
                     if builtin.starts_with(slice) && !matches.contains(&builtin.to_string()) {
@@ -551,16 +577,13 @@ fn main() {
                     }
                 }
 
-                // Sort the total combined list alphabetically
                 matches.sort();
 
-                // If there are no matches at all, ring the bell and return empty
                 if matches.is_empty() {
                     *self.tab_state.lock().unwrap() = None;
                     return Ok((pos, vec![]));
                 }
 
-                // For single matches, complete automatically with a trailing space
                 if matches.len() == 1 {
                     let candidate = Pair {
                         display: matches[0].clone(),
@@ -572,13 +595,10 @@ fn main() {
                     return Ok((0, vec![candidate]));
                 }
 
-                // For multiple matches: use longest common prefix (LCP) logic
                 let lcp = longest_common_prefix(&matches);
 
-                // Track the tab execution state for multiple matches
                 let mut state = self.tab_state.lock().unwrap();
                 
-                // Check if we're in the same completion context
                 let is_first_tab = if let Some((last_line, _, _, last_matches, _)) = state.as_ref() {
                     let last_matches_names: Vec<String> = last_matches.iter().map(|(n, _)| n.clone()).collect();
                     !(last_line == line && last_matches_names == matches)
@@ -587,7 +607,6 @@ fn main() {
                 };
 
                 if is_first_tab {
-                    // First tab: complete to LCP if it extends beyond current input
                     *state = Some((line.to_string(), String::new(), String::new(), matches.iter().map(|m| (m.clone(), false)).collect(), true));
                     
                     if lcp.len() > slice.len() {
@@ -597,13 +616,11 @@ fn main() {
                         };
                         return Ok((0, vec![candidate]));
                     } else {
-                        // LCP is same as current input, ring bell
                         print!("\x07");
                         std::io::stdout().flush().ok();
                         return Ok((pos, vec![]));
                     }
                 } else {
-                    // Subsequent tab presses: show all matches
                     let output = matches.join("  ");
                     println!();
                     print!("{}", output);
@@ -613,62 +630,45 @@ fn main() {
                     
                     *state = Some((line.to_string(), String::new(), String::new(), matches.iter().map(|m| (m.clone(), false)).collect(), false));
                     
-                    // Return empty to avoid making any modifications
                     return Ok((pos, vec![]));
                 }
             } else if let Some(last_space_pos) = slice.rfind(' ') {
-                // We're completing an argument (not the command)
                 let cmd = slice[..last_space_pos].trim();
                 
-                // Extract the base command (first word)
                 let base_cmd = if let Some(space_in_cmd) = cmd.find(' ') {
                     &cmd[..space_in_cmd]
                 } else {
                     cmd
                 };
                 
-                // First, check if a completer is registered for the base command
                 let completer_for_cmd = {
                     let completions = COMPLETIONS.lock().unwrap();
                     completions.get(base_cmd).cloned()
                 };
 
                 if let Some(completer_path) = completer_for_cmd {
-                    // We have a registered completer for this command
-                    // Parse all the parts of the current line
                     let cmd_parts = parse_command_with_quotes(slice);
                     
-                    // If cmd_parts is empty, something went wrong; return empty
                     if cmd_parts.is_empty() {
                         return Ok((pos, vec![]));
                     }
                     
-                    // The word_index is the index of the word being completed (1-based from the command)
-                    // cmd_parts[0] is the command name, so for arguments:
-                    // - first arg has index 1
-                    // - second arg has index 2, etc.
                     let word_index = cmd_parts.len() - 1;
                     
-                    // Run the completer script and get its output
                     if let Some(candidates) = invoke_completer(&completer_path, &cmd_parts, word_index, line, pos) {
-                        // Get the position where we should start replacing
-                        // This is right after the last space
                         let start_pos = last_space_pos + 1;
                         
-                        // Extract the current word being completed
                         let current_word = if let Some(w) = cmd_parts.last() {
                             w.as_str()
                         } else {
                             ""
                         };
                         
-                        // Handle multiple candidates
                         if candidates.is_empty() {
                             return Ok((pos, vec![]));
                         }
 
                         if candidates.len() == 1 {
-                            // Single candidate - auto-complete with trailing space
                             return Ok((
                                 start_pos,
                                 vec![Pair {
@@ -678,11 +678,9 @@ fn main() {
                             ));
                         }
 
-                        // Multiple candidates - use LCP logic
                         let lcp = longest_common_prefix(&candidates);
                         let mut state = self.tab_state.lock().unwrap();
 
-                        // Check if we're in the same completion context
                         let is_first_tab = if let Some((last_line, _, _, _, _)) = state.as_ref() {
                             last_line != line
                         } else {
@@ -690,9 +688,7 @@ fn main() {
                         };
 
                         if is_first_tab {
-                            // First TAB: check if LCP extends current input
                             if lcp.len() > current_word.len() {
-                                // LCP extends beyond current word, complete to LCP
                                 *state = Some((
                                     line.to_string(),
                                     String::new(),
@@ -709,7 +705,6 @@ fn main() {
                                     }],
                                 ));
                             } else {
-                                // LCP doesn't extend beyond current word, ring bell
                                 print!("\x07");
                                 std::io::stdout().flush().ok();
 
@@ -724,7 +719,6 @@ fn main() {
                                 return Ok((pos, vec![]));
                             }
                         } else {
-                            // Second TAB: display all candidates
                             let output = candidates.join("  ");
                             println!();
                             print!("{}", output);
@@ -745,22 +739,16 @@ fn main() {
                     }
                 }
 
-                // If no registered completer, use default file completion logic
-                // Extract the partial filename/argument after the last space
                 let partial = &slice[last_space_pos + 1..];
                 
-                // Determine if we need to search in a directory or current dir
                 let (dir_path, prefix, replacement_base) = if let Some(last_slash_pos) = partial.rfind('/') {
-                    // If there's a slash, split at the last slash
                     let dir = &partial[..=last_slash_pos];
                     let pre = &partial[last_slash_pos + 1..];
                     (dir, pre, dir)
                 } else {
-                    // No slash, search in current directory
                     (".", partial, "")
                 };
                 
-                // Find matching files
                 let matches = if dir_path == "." {
                     find_files_in_current_dir_matching(prefix)
                 } else {
@@ -768,12 +756,10 @@ fn main() {
                 };
                 
                 if matches.is_empty() {
-                    // No matches found
                     *self.tab_state.lock().unwrap() = None;
                     return Ok((pos, vec![]));
                 }
                 
-                // For single match, auto-complete it with trailing character
                 if matches.len() == 1 {
                     let (match_name, is_dir) = &matches[0];
                     let suffix = if *is_dir { "/" } else { " " };
@@ -790,32 +776,23 @@ fn main() {
                     ));
                 }
 
-                // Multiple matches found - use LCP logic
                 let lcp = longest_common_prefix_files(&matches);
                 
                 let mut state = self.tab_state.lock().unwrap();
                 
-                // Check if this is the same context as the previous tab
                 let is_first_tab = if let Some((last_line, last_dir, last_prefix, _last_matches, _was_first)) = state.as_ref() {
                     let same_context = last_line == line && last_dir == dir_path && last_prefix == prefix;
                     if same_context {
-                        // Same context, this is not the first tab anymore
                         false
                     } else {
-                        // Different context, this is a new first tab
                         true
                     }
                 } else {
-                    // First time with these matches
                     true
                 };
 
                 if is_first_tab {
-                    // First TAB: try to complete to LCP
-                    
-                    // Check if LCP is longer than current prefix
                     if lcp.len() > prefix.len() {
-                        // LCP extends beyond current input, complete to LCP
                         let completion = format!("{}{}", replacement_base, lcp);
                         
                         *state = Some((
@@ -834,7 +811,6 @@ fn main() {
                             }],
                         ));
                     } else {
-                        // LCP is same as current prefix, ring bell
                         print!("\x07");
                         std::io::stdout().flush().ok();
                         
@@ -849,8 +825,6 @@ fn main() {
                         return Ok((pos, vec![]));
                     }
                 } else {
-                    // Subsequent TABs: list matches
-                    // Format matches with directories showing /
                     let formatted_matches: Vec<String> = matches
                         .iter()
                         .map(|(name, is_dir)| {
@@ -862,16 +836,13 @@ fn main() {
                         })
                         .collect();
                     
-                    // Print on a new line with two-space separation
                     let output = formatted_matches.join("  ");
-                    // Write directly to stdout to display matches
                     println!();
                     print!("{}", output);
                     println!();
                     print!("$ {}", line);
                     std::io::stdout().flush().ok();
                     
-                    // Update state to reflect we're still on subsequent tabs
                     *state = Some((
                         line.to_string(),
                         dir_path.to_string(),
@@ -880,7 +851,6 @@ fn main() {
                         false,
                     ));
                     
-                    // Return empty to avoid making any modifications to the input
                     return Ok((pos, vec![]));
                 }
             }
@@ -900,6 +870,9 @@ fn main() {
     }));
 
     loop {
+        // Automatically reap finished jobs before displaying prompt
+        reap_jobs(true);
+
         let readline = rl.readline("$ ");
         match readline {
             Ok(line) => {
@@ -913,15 +886,13 @@ fn main() {
                     continue;
                 }
 
-                // Check if the last token is &
                 let run_background = if !parts.is_empty() && parts[parts.len() - 1] == "&" {
-                    parts.pop(); // Remove the & token
+                    parts.pop();
                     true
                 } else {
                     false
                 };
 
-                // After removing &, check if there are still parts left
                 if parts.is_empty() {
                     continue;
                 }
@@ -1030,90 +1001,44 @@ fn main() {
                         eprintln!("cd: {}: No such file or directory", target_dir);
                     }
                 } else if cmd == "jobs" {
-                    // Check each job to see if it has exited
+                    // Refresh statuses without prompt printing
+                    reap_jobs(false);
+
                     let mut jobs = JOBS.lock().unwrap();
-                    let mut children = CHILD_PROCESSES.lock().unwrap();
-                    let mut completed_pids = Vec::new();
-                    
-                    // Check status of each job
-                    for job in jobs.iter_mut() {
-                        if let Some(mut child) = children.remove(&job.pid) {
-                            // Try to get the status without blocking
-                            match child.try_wait() {
-                                Ok(Some(_status)) => {
-                                    // Process has exited
-                                    job.status = "Done".to_string();
-                                    completed_pids.push(job.pid);
-                                }
-                                Ok(None) => {
-                                    // Process is still running, put it back
-                                    children.insert(job.pid, child);
-                                }
-                                Err(_) => {
-                                    // Error checking status, put it back
-                                    children.insert(job.pid, child);
-                                }
-                            }
+                    let markers = get_job_markers(&jobs);
+
+                    for job in jobs.iter() {
+                        let marker = markers.get(&job.pid).copied().unwrap_or(" ");
+                        if job.status == "Done" {
+                            println!(
+                                "[{}]{}  {:<24}{}",
+                                job.job_number, marker, job.status, job.command
+                            );
+                        } else {
+                            println!(
+                                "[{}]{}  {:<24}{} &",
+                                job.job_number, marker, job.status, job.command
+                            );
                         }
                     }
-                    
-                    // Display all jobs
-                    if !jobs.is_empty() {
-                        let job_count = jobs.len();
-                        
-                        for (index, job) in jobs.iter().enumerate() {
-                            // Determine the marker for this job
-                            let marker = if index == job_count - 1 {
-                                // Most recent job (last in the list)
-                                "+"
-                            } else if index == job_count - 2 {
-                                // Second most recent job
-                                "-"
-                            } else {
-                                // All other jobs
-                                " "
-                            };
-                            
-                            // Format output based on status
-                            if job.status == "Done" {
-                                // Done jobs don't have trailing &
-                                println!("[{}]{}  {:<24}{}", job.job_number, marker, job.status, job.command);
-                            } else {
-                                // Running jobs have trailing &
-                                println!("[{}]{}  {:<24}{} &", job.job_number, marker, job.status, job.command);
-                            }
-                        }
-                    }
-                    
-                    // Remove completed jobs
+
+                    // Clear 'Done' jobs after being printed by builtin `jobs`
                     jobs.retain(|job| job.status != "Done");
-                    
                 } else if cmd == "complete" {
-                    // Handle the complete builtin command
                     if parts.len() < 2 {
-                        // No arguments provided to complete
                         continue;
                     }
                     
-                    // Check if -r flag is provided (remove completion)
                     if parts[1] == "-r" {
-                        // -r flag requires a command name
                         if parts.len() < 3 {
                             eprintln!("complete: -r: option requires an argument");
                             continue;
                         }
                         
                         let command_name = &parts[2];
-                        
-                        // Remove the completion (if it exists)
                         let mut completions = COMPLETIONS.lock().unwrap();
                         completions.remove(command_name);
-                        
-                        // The -r flag produces no output on success (even if command wasn't registered)
-                    }
-                    // Check if -C flag is provided (register completion)
-                    else if parts[1] == "-C" {
-                        // -C flag requires at least: complete -C <path> <command>
+                    } else if parts[1] == "-C" {
                         if parts.len() < 4 {
                             eprintln!("complete: -C: option requires an argument");
                             continue;
@@ -1122,15 +1047,9 @@ fn main() {
                         let completer_path = &parts[2];
                         let command_name = &parts[3];
                         
-                        // Register the completion
                         let mut completions = COMPLETIONS.lock().unwrap();
                         completions.insert(command_name.clone(), completer_path.clone());
-                        
-                        // The -C flag produces no output on success
-                    }
-                    // Check if -p flag is provided (display completion)
-                    else if parts[1] == "-p" {
-                        // -p flag requires a command name
+                    } else if parts[1] == "-p" {
                         if parts.len() < 3 {
                             eprintln!("complete: -p: option requires an argument");
                             continue;
@@ -1140,10 +1059,8 @@ fn main() {
                         let completions = COMPLETIONS.lock().unwrap();
                         
                         if let Some(completer_path) = completions.get(command_name) {
-                            // Print in normalized format: complete -C '<path>' <command>
                             println!("complete -C '{}' {}", completer_path, command_name);
                         } else {
-                            // Print error message for no completion specification
                             eprintln!("complete: {}: no completion specification", command_name);
                         }
                     }
