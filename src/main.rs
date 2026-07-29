@@ -17,7 +17,6 @@ struct Job {
 
 lazy_static::lazy_static! {
     static ref COMPLETIONS: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
-    static ref JOB_COUNTER: Mutex<u32> = Mutex::new(0);
     static ref JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
     static ref CHILD_PROCESSES: Mutex<HashMap<u32, Box<std::process::Child>>> = Mutex::new(HashMap::new());
 }
@@ -366,9 +365,15 @@ fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection
         if run_background {
             let child = command.spawn()?;
             let pid = child.id();
-            let mut counter = JOB_COUNTER.lock().unwrap();
-            *counter += 1;
-            let job_number = *counter;
+
+            let mut jobs = JOBS.lock().unwrap();
+
+            // Calculate recycled job number based on current jobs table
+            let job_number = jobs
+                .iter()
+                .map(|j| j.job_number)
+                .max()
+                .map_or(1, |max_num| max_num + 1);
 
             let mut children = CHILD_PROCESSES.lock().unwrap();
             children.insert(pid, Box::new(child));
@@ -380,7 +385,6 @@ fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection
                 command: job_command,
                 status: "Running".to_string(),
             };
-            let mut jobs = JOBS.lock().unwrap();
             jobs.push(job);
             
             println!("[{}] {}", job_number, pid);
