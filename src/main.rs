@@ -342,6 +342,136 @@ fn parse_with_redirection(input: &str) -> (Vec<String>, Redirection) {
     (command_parts, redirection)
 }
 
+/// Split a command by pipes
+fn split_by_pipes(parts: &[String]) -> Vec<Vec<String>> {
+    let mut pipelines = Vec::new();
+    let mut current_pipeline = Vec::new();
+    
+    for part in parts {
+        if part == "|" {
+            if !current_pipeline.is_empty() {
+                pipelines.push(current_pipeline);
+                current_pipeline = Vec::new();
+            }
+        } else {
+            current_pipeline.push(part.clone());
+        }
+    }
+    
+    if !current_pipeline.is_empty() {
+        pipelines.push(current_pipeline);
+    }
+    
+    pipelines
+}
+
+fn execute_pipeline(pipelines: Vec<Vec<String>>, redirection: Redirection, run_background: bool, original_command: &str) -> Result<(), Box<dyn std::error::Error>> {
+    if pipelines.is_empty() {
+        return Ok(());
+    }
+
+    let mut children: Vec<process::Child> = Vec::new();
+    
+    for (i, pipeline_parts) in pipelines.iter().enumerate() {
+        if pipeline_parts.is_empty() {
+            continue;
+        }
+        
+        let cmd = &pipeline_parts[0];
+        let args = &pipeline_parts[1..];
+        
+        if let Some(program_path) = find_executable_in_path(cmd) {
+            let mut command = process::Command::new(&program_path);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::CommandExt;
+                command.arg0(cmd);
+            }
+            for arg in args {
+                command.arg(arg);
+            }
+            
+            // Set up stdin: if not the first command, pipe from previous
+            if i > 0 {
+                if let Some(prev_child) = children.last_mut() {
+                    if let Some(stdout) = prev_child.stdout.take() {
+                        command.stdin(stdout);
+                    }
+                }
+            }
+            
+            // Set up stdout: if not the last command, create a pipe
+            if i < pipelines.len() - 1 {
+                command.stdout(process::Stdio::piped());
+            } else {
+                // Last command: apply redirection if specified
+                if let Some((filename, is_append)) = &redirection.stdout_target {
+                    let file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(*is_append)
+                        .write(!is_append)
+                        .truncate(!is_append)
+                        .open(filename)?;
+                    command.stdout(file);
+                }
+            }
+            
+            // Set up stderr redirection (only for last command)
+            if i == pipelines.len() - 1 {
+                if let Some((filename, is_append)) = &redirection.stderr_target {
+                    let file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(*is_append)
+                        .write(!is_append)
+                        .truncate(!is_append)
+                        .open(filename)?;
+                    command.stderr(file);
+                }
+            }
+            
+            let child = command.spawn()?;
+            children.push(child);
+        } else {
+            return Err(format!("{}: command not found", cmd).into());
+        }
+    }
+    
+    // Wait for all children if not running in background
+    if run_background {
+        if let Some(mut last_child) = children.pop() {
+            let pid = last_child.id();
+            
+            let mut jobs = JOBS.lock().unwrap();
+            
+            let job_number = jobs
+                .iter()
+                .map(|j| j.job_number)
+                .max()
+                .map_or(1, |max_num| max_num + 1);
+            
+            let mut child_processes = CHILD_PROCESSES.lock().unwrap();
+            child_processes.insert(pid, Box::new(last_child));
+            
+            let job_command = original_command.trim_end_matches('&').trim().to_string();
+            let job = Job {
+                job_number,
+                pid,
+                command: job_command,
+                status: "Running".to_string(),
+            };
+            jobs.push(job);
+            
+            println!("[{}] {}", job_number, pid);
+        }
+    } else {
+        for mut child in children {
+            child.wait()?;
+        }
+    }
+    
+    Ok(())
+}
+
 fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection, run_background: bool, original_command: &str) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(program_path) = find_executable_in_path(cmd) {
         let mut command = process::Command::new(&program_path);
@@ -1069,9 +1199,17 @@ fn main() {
                         }
                     }
                 } else {
-                    let args = parts[1..].to_vec();
-                    if let Err(e) = execute_external_program(cmd, &args, redirection, run_background, command) {
-                        eprintln!("{}", e);
+                    // Check if command contains pipes
+                    if parts.contains(&"|".to_string()) {
+                        let pipelines = split_by_pipes(&parts);
+                        if let Err(e) = execute_pipeline(pipelines, redirection, run_background, command) {
+                            eprintln!("{}", e);
+                        }
+                    } else {
+                        let args = parts[1..].to_vec();
+                        if let Err(e) = execute_external_program(cmd, &args, redirection, run_background, command) {
+                            eprintln!("{}", e);
+                        }
                     }
                 }
             }
