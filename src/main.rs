@@ -371,6 +371,7 @@ fn execute_pipeline(pipelines: Vec<Vec<String>>, redirection: Redirection, run_b
     }
 
     let mut children: Vec<process::Child> = Vec::new();
+    let mut builtin_pipe_input: Option<Vec<u8>> = None;
     
     for (i, pipeline_parts) in pipelines.iter().enumerate() {
         if pipeline_parts.is_empty() {
@@ -380,21 +381,68 @@ fn execute_pipeline(pipelines: Vec<Vec<String>>, redirection: Redirection, run_b
         let cmd = &pipeline_parts[0];
         let args = &pipeline_parts[1..];
         
-        if let Some(program_path) = find_executable_in_path(cmd) {
-            let mut command = process::Command::new(&program_path);
-            #[cfg(unix)]
-            {
-                use std::os::unix::process::CommandExt;
-                command.arg0(cmd);
+        // Check if this is a built-in command
+        if is_builtin(cmd) {
+            // Generate output from the built-in
+            let output_text = match cmd.as_str() {
+                "echo" => {
+                    args.join(" ")
+                }
+                "type" => {
+                    if args.is_empty() {
+                        return Err("type: missing argument".into());
+                    }
+                    let target_cmd = &args[0];
+                    if is_builtin(target_cmd) {
+                        format!("{} is a shell builtin", target_cmd)
+                    } else if let Some(full_path) = find_executable_in_path(target_cmd) {
+                        format!("{} is {}", target_cmd, full_path)
+                    } else {
+                        format!("{}: not found", target_cmd)
+                    }
+                }
+                "pwd" => {
+                    match env::current_dir() {
+                        Ok(path) => format!("{}", path.display()),
+                        Err(e) => return Err(format!("pwd: {}", e).into()),
+                    }
+                }
+                _ => {
+                    return Err(format!("{}: not supported in pipeline", cmd).into());
+                }
+            };
+            
+            if i == pipelines.len() - 1 {
+                // Last command in pipeline - output to redirection or stdout
+                if let Some((filename, is_append)) = &redirection.stdout_target {
+                    let mut file = fs::OpenOptions::new()
+                        .create(true)
+                        .append(*is_append)
+                        .write(!is_append)
+                        .truncate(!is_append)
+                        .open(filename)?;
+                    writeln!(file, "{}", output_text)?;
+                } else {
+                    println!("{}", output_text);
+                }
+            } else {
+                // Not the last command - pass output to next command
+                builtin_pipe_input = Some(format!("{}\n", output_text).into_bytes());
             }
+        } else {
+            // External command
+            let mut command = process::Command::new(cmd);
             for arg in args {
                 command.arg(arg);
             }
             
             // Set up stdin: if not the first command, pipe from previous
             if i > 0 {
-                if let Some(prev_child) = children.last_mut() {
-                    if let Some(stdout) = prev_child.stdout.take() {
+                if let Some(_input_data) = builtin_pipe_input.as_ref() {
+                    // Use piped stdin for builtin output
+                    command.stdin(process::Stdio::piped());
+                } else if let Some(prev_child) = children.pop() {
+                    if let Some(stdout) = prev_child.stdout {
                         command.stdin(stdout);
                     }
                 }
@@ -429,16 +477,22 @@ fn execute_pipeline(pipelines: Vec<Vec<String>>, redirection: Redirection, run_b
                 }
             }
             
-            let child = command.spawn()?;
+            let mut child = command.spawn()?;
+            
+            // Write builtin input if we have any
+            if let Some(input_data) = builtin_pipe_input.take() {
+                if let Some(mut stdin) = child.stdin.take() {
+                    stdin.write_all(&input_data)?;
+                }
+            }
+            
             children.push(child);
-        } else {
-            return Err(format!("{}: command not found", cmd).into());
         }
     }
     
     // Wait for all children if not running in background
     if run_background {
-        if let Some(mut last_child) = children.pop() {
+        if let Some(last_child) = children.pop() {
             let pid = last_child.id();
             
             let mut jobs = JOBS.lock().unwrap();
@@ -1033,7 +1087,13 @@ fn main() {
 
                 let cmd = &parts[0];
 
-                if cmd == "exit" {
+                // Check if command contains pipes FIRST
+                if parts.contains(&"|".to_string()) {
+                    let pipelines = split_by_pipes(&parts);
+                    if let Err(e) = execute_pipeline(pipelines, redirection, run_background, command) {
+                        eprintln!("{}", e);
+                    }
+                } else if cmd == "exit" {
                     process::exit(0);
                 } else if cmd == "echo" {
                     let args = &parts[1..];
@@ -1199,17 +1259,9 @@ fn main() {
                         }
                     }
                 } else {
-                    // Check if command contains pipes
-                    if parts.contains(&"|".to_string()) {
-                        let pipelines = split_by_pipes(&parts);
-                        if let Err(e) = execute_pipeline(pipelines, redirection, run_background, command) {
-                            eprintln!("{}", e);
-                        }
-                    } else {
-                        let args = parts[1..].to_vec();
-                        if let Err(e) = execute_external_program(cmd, &args, redirection, run_background, command) {
-                            eprintln!("{}", e);
-                        }
+                    let args = parts[1..].to_vec();
+                    if let Err(e) = execute_external_program(cmd, &args, redirection, run_background, command) {
+                        eprintln!("{}", e);
                     }
                 }
             }
