@@ -19,6 +19,7 @@ lazy_static::lazy_static! {
     static ref COMPLETIONS: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
     static ref JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
     static ref CHILD_PROCESSES: Mutex<HashMap<u32, Box<std::process::Child>>> = Mutex::new(HashMap::new());
+    static ref HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
 }
 
 /// Compute markers (+, -, or space) based on current job list
@@ -170,7 +171,7 @@ fn find_files_in_path_matching(dir_path: &str, prefix: &str) -> Vec<(String, boo
 }
 
 fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "echo" | "exit" | "type" | "pwd" | "cd" | "complete" | "jobs")
+    matches!(cmd, "echo" | "exit" | "type" | "pwd" | "cd" | "complete" | "jobs" | "history")
 }
 
 fn find_executable_in_path(command: &str) -> Option<String> {
@@ -758,7 +759,7 @@ fn main() {
 
                 let mut matches = find_executables_in_path_matching(slice);
 
-                let builtins = ["echo", "exit", "type", "pwd", "cd", "complete", "jobs"];
+                let builtins = ["echo", "exit", "type", "pwd", "cd", "complete", "jobs", "history"];
                 for builtin in builtins {
                     if builtin.starts_with(slice) && !matches.contains(&builtin.to_string()) {
                         matches.push(builtin.to_string());
@@ -1087,6 +1088,12 @@ fn main() {
 
                 let cmd = &parts[0];
 
+                // Add command to history (before executing)
+                {
+                    let mut history = HISTORY.lock().unwrap();
+                    history.push(command.to_string());
+                }
+
                 // Check if command contains pipes FIRST
                 if parts.contains(&"|".to_string()) {
                     let pipelines = split_by_pipes(&parts);
@@ -1218,6 +1225,11 @@ fn main() {
 
                     // Clear 'Done' jobs after being printed by builtin `jobs`
                     jobs.retain(|job| job.status != "Done");
+                } else if cmd == "history" {
+                    let history = HISTORY.lock().unwrap();
+                    for (index, cmd) in history.iter().enumerate() {
+                        println!("{:5}  {}", index + 1, cmd);
+                    }
                 } else if cmd == "complete" {
                     if parts.len() < 2 {
                         continue;
