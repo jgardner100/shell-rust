@@ -1226,35 +1226,61 @@ fn main() {
                     // Clear 'Done' jobs after being printed by builtin `jobs`
                     jobs.retain(|job| job.status != "Done");
                 } else if cmd == "history" {
-                    let history = HISTORY.lock().unwrap();
-                    
-                    // Determine how many entries to display
-                    let num_to_display = if parts.len() > 1 {
-                        // Parse the optional number argument
-                        match parts[1].parse::<usize>() {
-                            Ok(n) => n,
-                            Err(_) => {
-                                eprintln!("history: {}: numeric argument required", parts[1]);
-                                continue;
+                    // Handle history -r <path_to_history_file>
+                    if parts.len() > 1 && parts[1] == "-r" {
+                        if parts.len() < 3 {
+                            eprintln!("history: -r: option requires an argument");
+                            continue;
+                        }
+                        
+                        let history_file_path = &parts[2];
+                        
+                        // Read the history file and append its contents to the history
+                        match fs::read_to_string(history_file_path) {
+                            Ok(content) => {
+                                let mut history = HISTORY.lock().unwrap();
+                                for line in content.lines() {
+                                    if !line.is_empty() {
+                                        history.push(line.to_string());
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("history: {}: {}", history_file_path, e);
                             }
                         }
                     } else {
-                        // No argument: display all history
-                        history.len()
-                    };
-                    
-                    // Calculate starting index
-                    let total_entries = history.len();
-                    let start_index = if num_to_display >= total_entries {
-                        0
-                    } else {
-                        total_entries - num_to_display
-                    };
-                    
-                    // Display the requested entries
-                    for (i, cmd_entry) in history[start_index..].iter().enumerate() {
-                        let line_number = start_index + i + 1;
-                        println!("{:5}  {}", line_number, cmd_entry);
+                        // Regular history display
+                        let history = HISTORY.lock().unwrap();
+                        
+                        // Determine how many entries to display
+                        let num_to_display = if parts.len() > 1 {
+                            // Parse the optional number argument
+                            match parts[1].parse::<usize>() {
+                                Ok(n) => n,
+                                Err(_) => {
+                                    eprintln!("history: {}: numeric argument required", parts[1]);
+                                    continue;
+                                }
+                            }
+                        } else {
+                            // No argument: display all history
+                            history.len()
+                        };
+                        
+                        // Calculate starting index
+                        let total_entries = history.len();
+                        let start_index = if num_to_display >= total_entries {
+                            0
+                        } else {
+                            total_entries - num_to_display
+                        };
+                        
+                        // Display the requested entries
+                        for (i, cmd_entry) in history[start_index..].iter().enumerate() {
+                            let line_number = start_index + i + 1;
+                            println!("{:5}  {}", line_number, cmd_entry);
+                        }
                     }
                 } else if cmd == "complete" {
                     if parts.len() < 2 {
