@@ -1249,6 +1249,35 @@ fn main() {
                                 eprintln!("history: {}: {}", history_file_path, e);
                             }
                         }
+                    } else if parts.len() > 1 && parts[1] == "-w" {
+                        // Handle history -w <path_to_history_file>
+                        if parts.len() < 3 {
+                            eprintln!("history: -w: option requires an argument");
+                            continue;
+                        }
+                        
+                        let history_file_path = &parts[2];
+                        
+                        // Write the history to the file
+                        let history = HISTORY.lock().unwrap();
+                        match fs::OpenOptions::new()
+                            .create(true)
+                            .write(true)
+                            .truncate(true)
+                            .open(history_file_path)
+                        {
+                            Ok(mut file) => {
+                                for entry in history.iter() {
+                                    if let Err(e) = writeln!(file, "{}", entry) {
+                                        eprintln!("history: {}: {}", history_file_path, e);
+                                        break;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("history: {}: {}", history_file_path, e);
+                            }
+                        }
                     } else {
                         // Regular history display
                         let history = HISTORY.lock().unwrap();
