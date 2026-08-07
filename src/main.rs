@@ -20,6 +20,7 @@ lazy_static::lazy_static! {
     static ref JOBS: Mutex<Vec<Job>> = Mutex::new(Vec::new());
     static ref CHILD_PROCESSES: Mutex<HashMap<u32, Box<std::process::Child>>> = Mutex::new(HashMap::new());
     static ref HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static ref LAST_APPENDED_INDEX: Mutex<usize> = Mutex::new(0);
 }
 
 /// Compute markers (+, -, or space) based on current job list
@@ -1244,6 +1245,9 @@ fn main() {
                                         history.push(line.to_string());
                                     }
                                 }
+                                // Update last appended index
+                                let mut last_appended = LAST_APPENDED_INDEX.lock().unwrap();
+                                *last_appended = history.len();
                             }
                             Err(e) => {
                                 eprintln!("history: {}: {}", history_file_path, e);
@@ -1278,6 +1282,48 @@ fn main() {
                                 eprintln!("history: {}: {}", history_file_path, e);
                             }
                         }
+                        // Update last appended index
+                        let mut last_appended = LAST_APPENDED_INDEX.lock().unwrap();
+                        *last_appended = history.len();
+                    } else if parts.len() > 1 && parts[1] == "-a" {
+                        // Handle history -a <path_to_history_file>
+                        if parts.len() < 3 {
+                            eprintln!("history: -a: option requires an argument");
+                            continue;
+                        }
+                        
+                        let history_file_path = &parts[2];
+                        
+                        // Append only new commands since last -a
+                        let history = HISTORY.lock().unwrap();
+                        let mut last_appended = LAST_APPENDED_INDEX.lock().unwrap();
+                        
+                        let start_index = *last_appended;
+                        let end_index = history.len();
+                        
+                        // Only write if there are new commands
+                        if start_index < end_index {
+                            match fs::OpenOptions::new()
+                                .create(true)
+                                .append(true)
+                                .open(history_file_path)
+                            {
+                                Ok(mut file) => {
+                                    for entry in history[start_index..end_index].iter() {
+                                        if let Err(e) = writeln!(file, "{}", entry) {
+                                            eprintln!("history: {}: {}", history_file_path, e);
+                                            break;
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    eprintln!("history: {}: {}", history_file_path, e);
+                                }
+                            }
+                        }
+                        
+                        // Update last appended index
+                        *last_appended = end_index;
                     } else {
                         // Regular history display
                         let history = HISTORY.lock().unwrap();
