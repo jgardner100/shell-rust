@@ -658,6 +658,28 @@ fn parse_command_with_quotes(input: &str) -> Vec<String> {
     args
 }
 
+/// Load history from HISTFILE environment variable
+fn load_history_from_file() {
+    if let Ok(histfile) = env::var("HISTFILE") {
+        match fs::read_to_string(&histfile) {
+            Ok(content) => {
+                let mut history = HISTORY.lock().unwrap();
+                for line in content.lines() {
+                    if !line.is_empty() {
+                        history.push(line.to_string());
+                    }
+                }
+                // Update last appended index to indicate all loaded entries are from file
+                let mut last_appended = LAST_APPENDED_INDEX.lock().unwrap();
+                *last_appended = history.len();
+            }
+            Err(_) => {
+                // If file doesn't exist or can't be read, just start with empty history
+            }
+        }
+    }
+}
+
 fn main() {
     use rustyline::Editor;
     use rustyline::error::ReadlineError;
@@ -667,6 +689,9 @@ fn main() {
     use rustyline::highlight::Highlighter;
     use rustyline::validate::Validator;
     use rustyline::{Context, Helper};
+
+    // Load history from HISTFILE on startup
+    load_history_from_file();
 
     struct ShellHelper {
         tab_state: Mutex<Option<(String, String, String, Vec<(String, bool)>, bool)>>,
