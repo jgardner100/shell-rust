@@ -680,6 +680,30 @@ fn load_history_from_file() {
     }
 }
 
+/// Write history to HISTFILE environment variable when exiting
+fn write_history_to_file() {
+    if let Ok(histfile) = env::var("HISTFILE") {
+        let history = HISTORY.lock().unwrap();
+        match fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&histfile)
+        {
+            Ok(mut file) => {
+                for entry in history.iter() {
+                    if let Err(_) = writeln!(file, "{}", entry) {
+                        break;
+                    }
+                }
+            }
+            Err(_) => {
+                // Silently ignore errors writing to history file
+            }
+        }
+    }
+}
+
 fn main() {
     use rustyline::Editor;
     use rustyline::error::ReadlineError;
@@ -1127,6 +1151,7 @@ fn main() {
                         eprintln!("{}", e);
                     }
                 } else if cmd == "exit" {
+                    write_history_to_file();
                     process::exit(0);
                 } else if cmd == "echo" {
                     let args = &parts[1..];
@@ -1433,10 +1458,12 @@ fn main() {
                 continue;
             }
             Err(ReadlineError::Eof) => {
+                write_history_to_file();
                 break;
             }
             Err(err) => {
                 eprintln!("Error: {:?}", err);
+                write_history_to_file();
                 break;
             }
         }
