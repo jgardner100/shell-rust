@@ -172,7 +172,7 @@ fn find_files_in_path_matching(dir_path: &str, prefix: &str) -> Vec<(String, boo
 }
 
 fn is_builtin(cmd: &str) -> bool {
-    matches!(cmd, "echo" | "exit" | "type" | "pwd" | "cd" | "complete" | "jobs" | "history")
+    matches!(cmd, "echo" | "exit" | "type" | "pwd" | "cd" | "complete" | "jobs" | "history" | "declare")
 }
 
 fn find_executable_in_path(command: &str) -> Option<String> {
@@ -809,7 +809,7 @@ fn main() {
 
                 let mut matches = find_executables_in_path_matching(slice);
 
-                let builtins = ["echo", "exit", "type", "pwd", "cd", "complete", "jobs", "history"];
+                let builtins = ["echo", "exit", "type", "pwd", "cd", "complete", "jobs", "history", "declare"];
                 for builtin in builtins {
                     if builtin.starts_with(slice) && !matches.contains(&builtin.to_string()) {
                         matches.push(builtin.to_string());
@@ -1407,6 +1407,9 @@ fn main() {
                             println!("{:5}  {}", line_number, cmd_entry);
                         }
                     }
+                } else if cmd == "declare" {
+                    // For now, declare is registered as a builtin but has no implementation.
+                    // This is a placeholder for future functionality.
                 } else if cmd == "complete" {
                     if parts.len() < 2 {
                         continue;
