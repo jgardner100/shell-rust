@@ -1408,8 +1408,27 @@ fn main() {
                         }
                     }
                 } else if cmd == "declare" {
-                    // For now, declare is registered as a builtin but has no implementation.
-                    // This is a placeholder for future functionality.
+                    // Handle declare builtin with -p flag
+                    if parts.len() < 2 {
+                        eprintln!("declare: missing arguments");
+                        continue;
+                    }
+
+                    if parts[1] == "-p" {
+                        // declare -p flag: print variable declaration
+                        if parts.len() < 3 {
+                            eprintln!("declare: -p: option requires an argument");
+                            continue;
+                        }
+
+                        let var_name = &parts[2];
+                        
+                        // For now, since we don't have a variable store yet,
+                        // we always report that the variable is not found
+                        eprintln!("declare: {}: not found", var_name);
+                    } else {
+                        eprintln!("declare: unknown option or missing flag");
+                    }
                 } else if cmd == "complete" {
                     if parts.len() < 2 {
                         continue;
