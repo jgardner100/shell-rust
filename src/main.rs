@@ -21,6 +21,7 @@ lazy_static::lazy_static! {
     static ref CHILD_PROCESSES: Mutex<HashMap<u32, Box<std::process::Child>>> = Mutex::new(HashMap::new());
     static ref HISTORY: Mutex<Vec<String>> = Mutex::new(Vec::new());
     static ref LAST_APPENDED_INDEX: Mutex<usize> = Mutex::new(0);
+    static ref VARIABLES: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 }
 
 /// Compute markers (+, -, or space) based on current job list
@@ -1408,7 +1409,7 @@ fn main() {
                         }
                     }
                 } else if cmd == "declare" {
-                    // Handle declare builtin with -p flag
+                    // Handle declare builtin
                     if parts.len() < 2 {
                         eprintln!("declare: missing arguments");
                         continue;
@@ -1422,12 +1423,26 @@ fn main() {
                         }
 
                         let var_name = &parts[2];
+                        let variables = VARIABLES.lock().unwrap();
                         
-                        // For now, since we don't have a variable store yet,
-                        // we always report that the variable is not found
-                        eprintln!("declare: {}: not found", var_name);
+                        if let Some(value) = variables.get(var_name) {
+                            println!("declare -- {}=\"{}\"", var_name, value);
+                        } else {
+                            eprintln!("declare: {}: not found", var_name);
+                        }
                     } else {
-                        eprintln!("declare: unknown option or missing flag");
+                        // declare NAME=VALUE: store variable
+                        let assignment = &parts[1];
+                        
+                        if let Some(eq_pos) = assignment.find('=') {
+                            let var_name = &assignment[..eq_pos];
+                            let var_value = &assignment[eq_pos + 1..];
+                            
+                            let mut variables = VARIABLES.lock().unwrap();
+                            variables.insert(var_name.to_string(), var_value.to_string());
+                        } else {
+                            eprintln!("declare: invalid syntax");
+                        }
                     }
                 } else if cmd == "complete" {
                     if parts.len() < 2 {
