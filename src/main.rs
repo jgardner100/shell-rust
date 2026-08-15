@@ -24,6 +24,25 @@ lazy_static::lazy_static! {
     static ref VARIABLES: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 }
 
+/// Check if a shell variable name is a valid identifier
+/// Valid identifier: starts with letter or underscore, followed by letters, digits, or underscores
+fn is_valid_identifier(name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    
+    let mut chars = name.chars();
+    
+    // First character must be a letter or underscore
+    match chars.next() {
+        Some(ch) if ch.is_alphabetic() || ch == '_' => {}
+        _ => return false,
+    }
+    
+    // Rest can be letters, digits, or underscores
+    chars.all(|ch| ch.is_alphanumeric() || ch == '_')
+}
+
 /// Compute markers (+, -, or space) based on current job list
 fn get_job_markers(jobs: &[Job]) -> HashMap<u32, &'static str> {
     let mut markers = HashMap::new();
@@ -1437,6 +1456,12 @@ fn main() {
                         if let Some(eq_pos) = assignment.find('=') {
                             let var_name = &assignment[..eq_pos];
                             let var_value = &assignment[eq_pos + 1..];
+                            
+                            // Validate the variable name
+                            if !is_valid_identifier(var_name) {
+                                eprintln!("declare: `{}': not a valid identifier", assignment);
+                                continue;
+                            }
                             
                             let mut variables = VARIABLES.lock().unwrap();
                             variables.insert(var_name.to_string(), var_value.to_string());
