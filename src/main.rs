@@ -43,6 +43,65 @@ fn is_valid_identifier(name: &str) -> bool {
     chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
+/// Expand $VAR variables in a word
+/// Returns a vector of expanded words (usually just one, but can be multiple if needed)
+fn expand_variables(word: &str) -> Vec<String> {
+    let mut result = String::new();
+    let mut chars = word.chars().peekable();
+    let mut expanded_words = Vec::new();
+
+    while let Some(ch) = chars.next() {
+        if ch == '$' {
+            // Check if next character is valid for variable name
+            if let Some(&next_ch) = chars.peek() {
+                if next_ch.is_alphabetic() || next_ch == '_' {
+                    // Extract the variable name
+                    let mut var_name = String::new();
+                    while let Some(&c) = chars.peek() {
+                        if c.is_alphanumeric() || c == '_' {
+                            var_name.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+
+                    // Look up the variable
+                    let variables = VARIABLES.lock().unwrap();
+                    if let Some(value) = variables.get(&var_name) {
+                        result.push_str(value);
+                    }
+                    // If variable not found, replace $VAR with empty string (like bash does)
+                } else {
+                    // Not a valid variable name start, keep the $
+                    result.push('$');
+                }
+            } else {
+                // End of string, keep the $
+                result.push('$');
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+
+    if !result.is_empty() {
+        expanded_words.push(result);
+    }
+    expanded_words
+}
+
+/// Expand variables in all arguments
+fn expand_variables_in_args(args: &[String]) -> Vec<String> {
+    let mut expanded_args = Vec::new();
+    
+    for arg in args {
+        let expanded = expand_variables(arg);
+        expanded_args.extend(expanded);
+    }
+    
+    expanded_args
+}
+
 /// Compute markers (+, -, or space) based on current job list
 fn get_job_markers(jobs: &[Job]) -> HashMap<u32, &'static str> {
     let mut markers = HashMap::new();
@@ -401,7 +460,10 @@ fn execute_pipeline(pipelines: Vec<Vec<String>>, redirection: Redirection, run_b
         }
         
         let cmd = &pipeline_parts[0];
-        let args = &pipeline_parts[1..];
+        let mut args = pipeline_parts[1..].to_vec();
+        
+        // Expand variables in arguments
+        args = expand_variables_in_args(&args);
         
         // Check if this is a built-in command
         if is_builtin(cmd) {
@@ -549,6 +611,9 @@ fn execute_pipeline(pipelines: Vec<Vec<String>>, redirection: Redirection, run_b
 }
 
 fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection, run_background: bool, original_command: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Expand variables in arguments
+    let expanded_args = expand_variables_in_args(args);
+    
     if let Some(program_path) = find_executable_in_path(cmd) {
         let mut command = process::Command::new(&program_path);
         #[cfg(unix)]
@@ -556,7 +621,7 @@ fn execute_external_program(cmd: &str, args: &[String], redirection: Redirection
             use std::os::unix::process::CommandExt;
             command.arg0(cmd);
         }
-        for arg in args {
+        for arg in &expanded_args {
             command.arg(arg);
         }
         if let Some((filename, is_append)) = &redirection.stdout_target {
@@ -1175,7 +1240,8 @@ fn main() {
                     process::exit(0);
                 } else if cmd == "echo" {
                     let args = &parts[1..];
-                    let output = args.join(" ");
+                    let expanded_args = expand_variables_in_args(args);
+                    let output = expanded_args.join(" ");
 
                     if let Some((stderr_filename, is_append)) = &redirection.stderr_target {
                         let _ = fs::OpenOptions::new()
