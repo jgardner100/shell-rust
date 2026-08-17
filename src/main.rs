@@ -43,19 +43,51 @@ fn is_valid_identifier(name: &str) -> bool {
     chars.all(|ch| ch.is_alphanumeric() || ch == '_')
 }
 
-/// Expand $VAR variables in a word
+/// Expand $VAR and ${VAR} variables in a word
 /// Returns a vector of expanded words (usually just one, but can be multiple if needed)
 fn expand_variables(word: &str) -> Vec<String> {
     let mut result = String::new();
     let mut chars = word.chars().peekable();
-    let mut expanded_words = Vec::new();
 
     while let Some(ch) = chars.next() {
         if ch == '$' {
-            // Check if next character is valid for variable name
+            // Check if next character is '{'
             if let Some(&next_ch) = chars.peek() {
-                if next_ch.is_alphabetic() || next_ch == '_' {
-                    // Extract the variable name
+                if next_ch == '{' {
+                    // Braced expansion: ${VAR}
+                    chars.next(); // consume the '{'
+                    let mut var_name = String::new();
+                    let mut found_closing_brace = false;
+                    
+                    // Extract the variable name until we find '}'
+                    while let Some(&c) = chars.peek() {
+                        if c == '}' {
+                            chars.next(); // consume the '}'
+                            found_closing_brace = true;
+                            break;
+                        } else if c.is_alphanumeric() || c == '_' {
+                            var_name.push(chars.next().unwrap());
+                        } else {
+                            // Invalid character in variable name
+                            break;
+                        }
+                    }
+                    
+                    if found_closing_brace && !var_name.is_empty() {
+                        // Look up the variable
+                        let variables = VARIABLES.lock().unwrap();
+                        if let Some(value) = variables.get(&var_name) {
+                            result.push_str(value);
+                        }
+                        // If variable not found, replace ${VAR} with empty string
+                    } else if !found_closing_brace {
+                        // No closing brace found, keep the ${ and var_name as-is
+                        result.push('$');
+                        result.push('{');
+                        result.push_str(&var_name);
+                    }
+                } else if next_ch.is_alphabetic() || next_ch == '_' {
+                    // Unbraced expansion: $VAR
                     let mut var_name = String::new();
                     while let Some(&c) = chars.peek() {
                         if c.is_alphanumeric() || c == '_' {
@@ -85,9 +117,10 @@ fn expand_variables(word: &str) -> Vec<String> {
     }
 
     if !result.is_empty() {
-        expanded_words.push(result);
+        vec![result]
+    } else {
+        Vec::new()
     }
-    expanded_words
 }
 
 /// Expand variables in all arguments
